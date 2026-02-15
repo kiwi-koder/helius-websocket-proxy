@@ -10,7 +10,7 @@ async function bootstrap() {
 
   const config = app.get(ConfigService<EnvConfig, true>);
 
-  const allowedOrigins = config.get('ALLOWED_ORIGINS').split(',');
+  const allowedOrigins = config.get('ALLOWED_ORIGINS').split(',').map((o: string) => o.trim().replace(/\/+$/, ''));
   app.enableCors({
     origin: allowedOrigins,
     credentials: true,

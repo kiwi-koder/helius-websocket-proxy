@@ -29,7 +29,9 @@ export class WsProxyGateway implements OnGatewayConnection, OnGatewayDisconnect 
     private readonly clients: ClientConnectionService,
     config: ConfigService,
   ) {
-    this.allowedOrigins = config.get<string>('ALLOWED_ORIGINS', 'http://localhost:3000').split(',');
+    this.allowedOrigins = config.get<string>('ALLOWED_ORIGINS', 'http://localhost:3000')
+      .split(',')
+      .map((o) => o.trim().replace(/\/+$/, ''));
   }
 
   /** Validate origin, assign a UUID, register the socket, and wire up the message handler. */
