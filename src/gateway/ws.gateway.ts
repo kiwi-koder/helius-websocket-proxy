@@ -1,6 +1,8 @@
 import { WebSocketGateway, OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
 import { Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'crypto';
+import { IncomingMessage } from 'http';
 import WebSocket from 'ws';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
 import { ClientConnectionService } from '../subscriptions/client-connection.service';
@@ -20,14 +22,25 @@ import { ServerErrorMessage } from './client-message.types';
 export class WsProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(WsProxyGateway.name);
   private readonly wsToId = new Map<WebSocket, string>();
+  private readonly allowedOrigins: string[];
 
   constructor(
     private readonly subscriptions: SubscriptionsService,
     private readonly clients: ClientConnectionService,
-  ) {}
+    config: ConfigService,
+  ) {
+    this.allowedOrigins = config.get<string>('ALLOWED_ORIGINS', 'http://localhost:3000').split(',');
+  }
 
-  /** Assign a UUID, register the socket, and wire up the message handler. */
-  handleConnection(client: WebSocket) {
+  /** Validate origin, assign a UUID, register the socket, and wire up the message handler. */
+  handleConnection(client: WebSocket, req: IncomingMessage) {
+    const origin = req.headers.origin ?? '';
+    if (!this.allowedOrigins.includes(origin)) {
+      this.logger.warn(`Rejected connection from origin: ${origin}`);
+      client.close(4003, 'Origin not allowed');
+      return;
+    }
+
     const connectionId = randomUUID();
     this.wsToId.set(client, connectionId);
     this.clients.register(connectionId, client);
