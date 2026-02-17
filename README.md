@@ -63,11 +63,7 @@ Open N upstream WebSocket connections and distribute subscriptions across them (
 
 ### Multi-instance with sticky sessions
 
-Run multiple proxy instances behind a load balancer configured with sticky sessions (e.g. cookie- or IP-based affinity). Each client's WebSocket is pinned to one instance, and each instance maintains its own upstream connection. Simple to deploy but subscription state is not shared across instances.
-
-### Leader/follower with internal pub/sub
-
-A single leader instance holds the upstream Helius connection. Follower instances accept client connections and proxy subscribe/unsubscribe requests to the leader over an internal channel (e.g. Redis Pub/Sub). The leader fans notifications back out to followers, which forward them to their clients. This avoids duplicate upstream subscriptions across instances.
+Run multiple proxy instances behind a load balancer configured with sticky sessions (e.g. cookie- or IP-based affinity). Each client's WebSocket is pinned to one instance, and each instance maintains its own upstream connection.
 
 ### Shared subscription dedup
 
