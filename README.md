@@ -57,9 +57,9 @@ fly deploy
 
 The current design uses a single upstream WebSocket per instance. Here are strategies for scaling beyond that.
 
-### Fan-out (multiple upstream connections per instance)
+### Multiple upstream connections per instance
 
-Open N upstream WebSocket connections and shard subscriptions across them (e.g. by hashing the subscription method + params). This raises the per-instance subscription ceiling without adding more machines.
+Open N upstream WebSocket connections and distribute subscriptions across them (e.g. round-robin or by hashing the subscription method + params). This raises the per-instance subscription ceiling when a single upstream connection hits Helius's per-connection limits.
 
 ### Multi-instance with sticky sessions
 
