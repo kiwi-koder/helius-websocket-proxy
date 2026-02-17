@@ -1,7 +1,6 @@
 import { WebSocketGateway, OnGatewayConnection, OnGatewayDisconnect } from '@nestjs/websockets';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { randomUUID } from 'crypto';
 import { IncomingMessage } from 'http';
 import WebSocket from 'ws';
 import { SubscriptionsService } from '../subscriptions/subscriptions.service';
@@ -21,7 +20,6 @@ import { ServerErrorMessage } from './client-message.types';
 })
 export class WsProxyGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private readonly logger = new Logger(WsProxyGateway.name);
-  private readonly wsToId = new Map<WebSocket, string>();
   private readonly allowedOrigins: string[];
 
   constructor(
@@ -34,7 +32,7 @@ export class WsProxyGateway implements OnGatewayConnection, OnGatewayDisconnect 
       .map((o) => o.trim().replace(/\/+$/, ''));
   }
 
-  /** Validate origin, assign a UUID, register the socket, and wire up the message handler. */
+  /** Validate origin, register the socket, and wire up the message handler. */
   handleConnection(client: WebSocket, req: IncomingMessage) {
     const origin = req.headers.origin ?? '';
     if (!this.allowedOrigins.includes(origin)) {
@@ -43,9 +41,7 @@ export class WsProxyGateway implements OnGatewayConnection, OnGatewayDisconnect 
       return;
     }
 
-    const connectionId = randomUUID();
-    this.wsToId.set(client, connectionId);
-    this.clients.register(connectionId, client);
+    const connectionId = this.clients.register(client);
     this.logger.log(`Client connected: ${connectionId}`);
 
     client.on('message', (data: WebSocket.Data) => {
@@ -55,9 +51,8 @@ export class WsProxyGateway implements OnGatewayConnection, OnGatewayDisconnect 
 
   /** Unregister the socket and notify SubscriptionsService of the disconnect. */
   handleDisconnect(client: WebSocket) {
-    const connectionId = this.wsToId.get(client);
+    const connectionId = this.clients.getId(client);
     if (!connectionId) return;
-    this.wsToId.delete(client);
     this.clients.remove(connectionId);
     this.subscriptions.handleDisconnect(connectionId);
     this.logger.log(`Client disconnected: ${connectionId}`);
@@ -65,7 +60,7 @@ export class WsProxyGateway implements OnGatewayConnection, OnGatewayDisconnect 
 
   /** Parse, validate, and route an incoming client message to the appropriate action. */
   private async handleRawMessage(client: WebSocket, data: WebSocket.Data) {
-    const connectionId = this.wsToId.get(client);
+    const connectionId = this.clients.getId(client);
     if (!connectionId) return;
 
     let parsed: unknown;
@@ -101,7 +96,7 @@ export class WsProxyGateway implements OnGatewayConnection, OnGatewayDisconnect 
     }
 
     if (msg.action === 'unsubscribe') {
-      const ok = this.subscriptions.unsubscribe(msg.subscriptionId);
+      const ok = this.subscriptions.unsubscribe(connectionId);
       if (ok) {
         this.clients.send(connectionId, {
           type: 'unsubscribed',

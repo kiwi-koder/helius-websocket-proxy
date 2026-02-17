@@ -32,12 +32,10 @@ const UNSUB_METHOD: Record<string, string> = {
 export class SubscriptionsService implements OnModuleDestroy {
   private readonly logger = new Logger(SubscriptionsService.name);
 
-  /** proxy sub ID → subscription */
+  /** connectionId → subscription (one subscription per connection) */
   private readonly subs = new Map<string, Subscription>();
-  /** helius sub ID → proxy sub ID (for notification dispatch) */
-  private readonly heliusIdToProxy = new Map<number, string>();
-  /** connection ID → proxy sub ID */
-  private readonly connToSub = new Map<string, string>();
+  /** helius sub ID → connectionId (for notification dispatch) */
+  private readonly heliusIdToConn = new Map<number, string>();
 
   private readonly idleTimeoutMs: number;
 
@@ -65,10 +63,6 @@ export class SubscriptionsService implements OnModuleDestroy {
    * generated, the RPC request is sent upstream, and once Helius responds
    * the mapping is recorded for future notification dispatch.
    *
-   * If the subscription is cancelled before the upstream response arrives
-   * (e.g. client disconnects), the upstream subscription is immediately
-   * cleaned up in the `.then()` handler.
-   *
    * @param connectionId - UUID of the client connection.
    * @param method - Solana subscription method (e.g. `accountSubscribe`).
    * @param params - Parameters for the subscription RPC call.
@@ -80,12 +74,9 @@ export class SubscriptionsService implements OnModuleDestroy {
     params: unknown[],
   ): Promise<string> {
     // Tear down existing subscription for this connection
-    const existingProxyId = this.connToSub.get(connectionId);
-    if (existingProxyId) {
-      const existingSub = this.subs.get(existingProxyId);
-      if (existingSub) {
-        this.teardown(existingSub);
-      }
+    const existing = this.subs.get(connectionId);
+    if (existing) {
+      this.teardown(existing);
     }
 
     const proxySubId = `sub_${randomUUID().slice(0, 12)}`;
@@ -100,8 +91,7 @@ export class SubscriptionsService implements OnModuleDestroy {
       cancelled: false,
       unsubscribeTimer: null,
     };
-    this.subs.set(proxySubId, sub);
-    this.connToSub.set(connectionId, proxySubId);
+    this.subs.set(connectionId, sub);
 
     // Send subscribe upstream
     const promise = this.upstream
@@ -124,14 +114,14 @@ export class SubscriptionsService implements OnModuleDestroy {
         }
         sub.heliusSubId = heliusSubId;
         sub.pendingPromise = null;
-        this.heliusIdToProxy.set(heliusSubId, proxySubId);
+        this.heliusIdToConn.set(heliusSubId, connectionId);
         this.logger.log(`Subscribed upstream: ${method} → helius id ${heliusSubId}`);
         return heliusSubId;
       })
       .catch((err) => {
         this.logger.error(`Upstream subscribe failed: ${err.message}`);
         sub.pendingPromise = null;
-        this.removeSub(proxySubId);
+        this.subs.delete(connectionId);
         throw err;
       });
 
@@ -141,19 +131,17 @@ export class SubscriptionsService implements OnModuleDestroy {
   }
 
   /**
-   * Unsubscribe a single proxy subscription by its ID.
+   * Unsubscribe the subscription owned by a connection.
    *
    * Does not tear down the upstream subscription immediately — instead
    * schedules removal after the idle grace period so the slot can be
    * reclaimed if the client reconnects quickly.
    *
-   * @returns `true` if the subscription existed and was scheduled for removal.
+   * @returns `true` if the connection had a subscription that was scheduled for removal.
    */
-  unsubscribe(proxySubId: string): boolean {
-    const sub = this.subs.get(proxySubId);
+  unsubscribe(connectionId: string): boolean {
+    const sub = this.subs.get(connectionId);
     if (!sub) return false;
-
-    this.connToSub.delete(sub.connectionId);
 
     // Schedule upstream teardown after grace period
     this.scheduleRemoval(sub);
@@ -164,28 +152,22 @@ export class SubscriptionsService implements OnModuleDestroy {
    * Handle a client WebSocket disconnection.
    *
    * Looks up the subscription owned by this connection and schedules it
-   * for removal after the idle grace period. The connection-to-subscription
-   * mapping is deleted immediately.
+   * for removal after the idle grace period.
    *
    * @param connectionId - UUID of the disconnected client.
    */
   handleDisconnect(connectionId: string) {
-    const proxySubId = this.connToSub.get(connectionId);
-    if (!proxySubId) return;
+    const sub = this.subs.get(connectionId);
+    if (!sub) return;
 
-    const sub = this.subs.get(proxySubId);
-    if (sub) {
-      this.scheduleRemoval(sub);
-    }
-
-    this.connToSub.delete(connectionId);
+    this.scheduleRemoval(sub);
   }
 
   /**
    * Dispatch an upstream subscription notification to the owning client.
    *
    * Listens for `upstream.notification` events emitted by {@link UpstreamService}.
-   * Maps the Helius subscription ID back to the proxy ID, then forwards the
+   * Maps the Helius subscription ID back to the connection, then forwards the
    * notification payload to the client, replacing the Helius ID with the
    * proxy ID so the client sees a stable identifier.
    */
@@ -194,17 +176,17 @@ export class SubscriptionsService implements OnModuleDestroy {
     const heliusSubId = msg.params?.subscription;
     if (heliusSubId == null) return;
 
-    const proxySubId = this.heliusIdToProxy.get(heliusSubId);
-    if (!proxySubId) return;
+    const connectionId = this.heliusIdToConn.get(heliusSubId);
+    if (!connectionId) return;
 
-    const sub = this.subs.get(proxySubId);
+    const sub = this.subs.get(connectionId);
     if (!sub) return;
 
-    this.clients.send(sub.connectionId, {
+    this.clients.send(connectionId, {
       jsonrpc: '2.0',
       method: msg.method,
       params: {
-        subscription: proxySubId,
+        subscription: sub.proxySubId,
         result: msg.params.result,
       },
     });
@@ -213,8 +195,8 @@ export class SubscriptionsService implements OnModuleDestroy {
   /**
    * Re-subscribe all active subscriptions after the upstream WebSocket reconnects.
    *
-   * Listens for `upstream.reconnected` events. Clears the old Helius-to-proxy
-   * ID map (stale after reconnect), then iterates every tracked subscription:
+   * Listens for `upstream.reconnected` events. Clears the old Helius-to-connection
+   * map (stale after reconnect), then iterates every tracked subscription:
    * - Subscriptions pending removal are torn down immediately.
    * - Active subscriptions are re-sent upstream and their ID mappings refreshed.
    *
@@ -223,9 +205,9 @@ export class SubscriptionsService implements OnModuleDestroy {
   @OnEvent('upstream.reconnected')
   async handleReconnected() {
     this.logger.log('Re-subscribing after upstream reconnect…');
-    this.heliusIdToProxy.clear();
+    this.heliusIdToConn.clear();
 
-    for (const [proxySubId, sub] of this.subs) {
+    for (const [connectionId, sub] of this.subs) {
       // Skip subs pending removal
       if (sub.unsubscribeTimer) {
         clearTimeout(sub.unsubscribeTimer);
@@ -242,7 +224,7 @@ export class SubscriptionsService implements OnModuleDestroy {
           const heliusSubId = result as number;
           sub.heliusSubId = heliusSubId;
           sub.pendingPromise = null;
-          this.heliusIdToProxy.set(heliusSubId, proxySubId);
+          this.heliusIdToConn.set(heliusSubId, connectionId);
           this.logger.log(`Re-subscribed: ${sub.method} → ${heliusSubId}`);
           return heliusSubId;
         })
@@ -266,7 +248,6 @@ export class SubscriptionsService implements OnModuleDestroy {
     return {
       upstreamSubscriptions: this.subs.size,
       clientSubscriptions: this.subs.size,
-      connections: this.connToSub.size,
     };
   }
 
@@ -301,7 +282,7 @@ export class SubscriptionsService implements OnModuleDestroy {
       sub.unsubscribeTimer = null;
     }
 
-    this.subs.delete(sub.proxySubId);
+    this.subs.delete(sub.connectionId);
 
     // If still pending, mark cancelled — .then() will clean up
     if (sub.pendingPromise) {
@@ -311,7 +292,7 @@ export class SubscriptionsService implements OnModuleDestroy {
 
     const unsubMethod = UNSUB_METHOD[sub.method];
     if (sub.heliusSubId != null && unsubMethod) {
-      this.heliusIdToProxy.delete(sub.heliusSubId);
+      this.heliusIdToConn.delete(sub.heliusSubId);
       try {
         await this.upstream.sendRequest(unsubMethod, [sub.heliusSubId]);
         this.logger.log(`Unsubscribed upstream: ${unsubMethod}(${sub.heliusSubId})`);
@@ -319,12 +300,5 @@ export class SubscriptionsService implements OnModuleDestroy {
         this.logger.warn(`Upstream unsubscribe failed: ${err}`);
       }
     }
-  }
-
-  private removeSub(proxySubId: string) {
-    const sub = this.subs.get(proxySubId);
-    if (!sub) return;
-    this.subs.delete(proxySubId);
-    this.connToSub.delete(sub.connectionId);
   }
 }

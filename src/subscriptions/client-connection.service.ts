@@ -1,31 +1,45 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import WebSocket from 'ws';
 
 /**
  * Registry of active client WebSocket connections.
  *
- * Each connection is identified by a UUID assigned at connect time.
- * Other services use this to send messages to specific clients without
- * holding direct references to WebSocket instances.
+ * Maintains bidirectional mappings between connection UUIDs and WebSocket
+ * instances. Other services use connection IDs to send messages without
+ * holding direct references to WebSocket objects.
  */
 @Injectable()
 export class ClientConnectionService {
   private readonly logger = new Logger(ClientConnectionService.name);
-  private readonly connections = new Map<string, WebSocket>();
+  private readonly idToWs = new Map<string, WebSocket>();
+  private readonly wsToId = new Map<WebSocket, string>();
 
-  /** Store a newly opened client WebSocket under its connection ID. */
-  register(connectionId: string, ws: WebSocket) {
-    this.connections.set(connectionId, ws);
+  /** Assign a UUID to the WebSocket and store both mappings. */
+  register(ws: WebSocket): string {
+    const connectionId = randomUUID();
+    this.idToWs.set(connectionId, ws);
+    this.wsToId.set(ws, connectionId);
+    return connectionId;
   }
 
-  /** Remove a client connection from the registry (called on disconnect). */
+  /** Look up the connection ID for a WebSocket instance. */
+  getId(ws: WebSocket): string | undefined {
+    return this.wsToId.get(ws);
+  }
+
+  /** Remove a connection by its ID. */
   remove(connectionId: string) {
-    this.connections.delete(connectionId);
+    const ws = this.idToWs.get(connectionId);
+    if (ws) {
+      this.wsToId.delete(ws);
+    }
+    this.idToWs.delete(connectionId);
   }
 
   /** JSON-serialize and send a message to a client. No-ops if the socket is not open. */
   send(connectionId: string, data: unknown) {
-    const ws = this.connections.get(connectionId);
+    const ws = this.idToWs.get(connectionId);
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
     try {
       ws.send(JSON.stringify(data));
@@ -35,6 +49,6 @@ export class ClientConnectionService {
   }
 
   get size(): number {
-    return this.connections.size;
+    return this.idToWs.size;
   }
 }
