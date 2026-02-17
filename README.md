@@ -1,12 +1,12 @@
 # Helius WebSocket Proxy
 
-A NestJS WebSocket proxy that multiplexes client connections onto a single upstream [Helius](https://helius.dev) Solana RPC WebSocket. Clients connect to the proxy, send lightweight subscribe/unsubscribe messages, and receive real-time notifications (account changes, program logs, slot updates, etc.) without each needing their own Helius connection.
+A NestJS WebSocket proxy that routes multiple client connections through a single upstream [Helius](https://helius.dev) Solana RPC WebSocket. Clients connect to the proxy, send a subscribe/unsubscribe message, and receive real-time notifications (account changes, program logs, slot updates, etc.) without each needing their own Helius connection.
 
 ## Architecture
 
 ```
 ┌────────┐          ┌──────────────────────────────────────────────┐          ┌────────┐
-│Client A│─ ws ──▶  │  WsProxyGateway (/ws)                       │          │        │
+│Client A│─ ws ──▶  │  WsProxyGateway (/ws)                        │          │        │
 ├────────┤          │    │                                         │          │ Helius │
 │Client B│─ ws ──▶  │    ▼                                         │  single  │  RPC   │
 ├────────┤          │  SubscriptionsService ──▶ UpstreamService ───┼── ws ──▶ │  WS    │
